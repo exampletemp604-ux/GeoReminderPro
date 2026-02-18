@@ -1,0 +1,7 @@
+{
+  "name": "GeoReminder",
+  "description": "A location-aware reminder app that alerts you when you enter a specific geographical radius. Built with React, Leaflet, and Tailwind.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
