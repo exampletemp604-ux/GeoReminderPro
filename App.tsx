@@ -1,19 +1,16 @@
 import { db } from "./utils/firebase";
 import { collection, addDoc, getDocs } from "firebase/firestore";
-
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus,
-  Navigation,
-  NavigationOff,
-  Bell,
   MapPin,
-  CheckCircle2,
   Trash2,
+  CheckCircle2,
   Activity,
-  AlertTriangle,
-  Info,
+  Moon,
+  Sun,
 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 import { Reminder, UserLocation, GeoStatus } from "./types";
 import { calculateDistance, formatDistance } from "./utils/geoUtils";
 import { AddReminderModal } from "./components/AddReminderModal";
@@ -21,152 +18,139 @@ import { TriggeredReminderModal } from "./components/TriggeredReminderModal";
 import { speakReminder } from "./services/ttsService";
 
 const App: React.FC = () => {
-  // State
-  const [reminders, setReminders] = useState<Reminder[]>(() => {
-    const saved = localStorage.getItem("georeminders");
-    return saved ? JSON.parse(saved) : [];
-  });
+  /* ================= UI STATE ================= */
+
+  const [dark, setDark] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [activeTriggeredReminder, setActiveTriggeredReminder] =
+    useState<Reminder | null>(null);
+
+  /* ================= PWA INSTALL STATE ================= */
+
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+
+  /* ================= APP STATE ================= */
+
+  const [reminders, setReminders] = useState<Reminder[]>([]);
   const [userLoc, setUserLoc] = useState<UserLocation | null>(null);
+  const [filter, setFilter] = useState<"active" | "triggered" | "completed">(
+    "active",
+  );
+
   const [trackingStatus, setTrackingStatus] = useState<GeoStatus>({
     active: false,
     error: null,
     lastUpdate: null,
   });
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [activeTriggeredReminder, setActiveTriggeredReminder] =
-    useState<Reminder | null>(null);
-  const [filter, setFilter] = useState<"active" | "triggered" | "completed">(
-    "active",
-  );
+
+  const watchIdRef = useRef<number | null>(null);
+
+  /* ================= LOAD REMINDERS ================= */
+
   useEffect(() => {
     const fetchReminders = async () => {
-      try {
-        const snapshot = await getDocs(collection(db, "reminders"));
-        const loaded = snapshot.docs.map((doc) => doc.data());
-        setReminders(loaded as Reminder[]);
-      } catch (err) {
-        console.error("Failed to load reminders:", err);
-      }
+      const snapshot = await getDocs(collection(db, "reminders"));
+      const loaded = snapshot.docs.map((doc) => doc.data());
+      setReminders(loaded as Reminder[]);
     };
-
     fetchReminders();
   }, []);
 
-  // Refs for tracking
-  const watchIdRef = useRef<number | null>(null);
+  /* ================= PWA INSTALL LOGIC ================= */
 
-  // Persistence
   useEffect(() => {
-    localStorage.setItem("georeminders", JSON.stringify(reminders));
-  }, [reminders]);
+    const handler = (e: any) => {
+      e.preventDefault();
 
-  // Request Notification Permission
-  useEffect(() => {
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
+      // If already installed → don't show
+      if (window.matchMedia("(display-mode: standalone)").matches) return;
+
+      // If already shown once → don't show again
+      if (localStorage.getItem("pwa-install-seen")) return;
+
+      setDeferredPrompt(e);
+    };
+
+    window.addEventListener("beforeinstallprompt", handler);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handler);
+    };
   }, []);
 
-  /**
-   * Notification and Vibration logic
-   */
   useEffect(() => {
-    if (activeTriggeredReminder) {
-      // Physical Feedback (Vibration)
-      if ("vibrate" in navigator) {
-        navigator.vibrate([400, 200, 400]);
-      }
+    if (!deferredPrompt) return;
 
-      // System Push Notification
-      if ("Notification" in window && Notification.permission === "granted") {
-        new Notification(`📍 Arrival Alert`, {
-          body: activeTriggeredReminder.originalInput,
-          icon: "https://cdn-icons-png.flaticon.com/512/252/252025.png",
-        });
-      }
-    }
-  }, [activeTriggeredReminder]);
+    const timer = setTimeout(async () => {
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
 
-  // Tracking Logic
+      localStorage.setItem("pwa-install-seen", "true");
+      setDeferredPrompt(null);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [deferredPrompt]);
+
+  useEffect(() => {
+    window.addEventListener("appinstalled", () => {
+      localStorage.setItem("pwa-install-seen", "true");
+    });
+  }, []);
+
+  /* ================= TRACKING ================= */
+
   const startTracking = useCallback(() => {
-    if (!navigator.geolocation) {
-      setTrackingStatus((prev) => ({
-        ...prev,
-        error: "Geolocation not supported",
-      }));
-      return;
-    }
+    if (!navigator.geolocation) return;
 
-    setTrackingStatus((prev) => ({ ...prev, active: true, error: null }));
+    setTrackingStatus((prev) => ({ ...prev, active: true }));
 
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        const { latitude, longitude, accuracy } = pos.coords;
-        const newLoc = {
-          lat: latitude,
-          lng: longitude,
-          accuracy,
-          timestamp: Date.now(),
-        };
-        setUserLoc(newLoc);
-        setTrackingStatus((prev) => ({ ...prev, lastUpdate: Date.now() }));
+    watchIdRef.current = navigator.geolocation.watchPosition((pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
 
-        // Geofencing Check
-        setReminders((prevReminders) => {
-          let updated = false;
-          let newlyFound: Reminder | null = null;
+      setUserLoc({
+        lat: latitude,
+        lng: longitude,
+        accuracy,
+        timestamp: Date.now(),
+      });
 
-          const next = prevReminders.map((r) => {
-            if (r.status !== "active") return r;
+      setReminders((prev) =>
+        prev.map((r) => {
+          if (r.status !== "active") return r;
 
-            const dist = calculateDistance(latitude, longitude, r.lat, r.lng);
-            const isTriggered = dist <= r.radiusMeters;
+          const dist = calculateDistance(latitude, longitude, r.lat, r.lng);
 
-            if (!isTriggered) return { ...r, lastDistance: dist };
-
-            // IMMEDIATE ACTION: Trigger Voice Alert before state finishes updating
-            // to minimize network latency perceived by the user.
+          if (dist <= r.radiusMeters) {
             speakReminder(r.originalInput || r.title);
 
-            // Mark as triggered
-            updated = true;
-            newlyFound = {
+            const updated = {
               ...r,
               status: "triggered" as const,
               triggeredAt: Date.now(),
               lastDistance: dist,
             };
-            return newlyFound;
-          });
 
-          // Show Modal
-          if (newlyFound) {
-            setActiveTriggeredReminder(newlyFound);
+            setActiveTriggeredReminder(updated);
+            return updated;
           }
 
-          return updated ? [...next] : next;
-        });
-      },
-      (err) => {
-        setTrackingStatus((prev) => ({
-          ...prev,
-          active: false,
-          error: err.message,
-        }));
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
-    );
+          return { ...r, lastDistance: dist };
+        }),
+      );
+    });
   }, []);
 
   const stopTracking = useCallback(() => {
-    if (watchIdRef.current !== null) {
+    if (watchIdRef.current) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
     setTrackingStatus((prev) => ({ ...prev, active: false }));
   }, []);
 
-  // Handlers
+  /* ================= CRUD ================= */
+
   const handleAddReminder = async (
     data: Omit<Reminder, "id" | "createdAt" | "status">,
   ) => {
@@ -177,203 +161,174 @@ const App: React.FC = () => {
       status: "active",
     };
 
-    try {
-      await addDoc(collection(db, "reminders"), newReminder);
-      setReminders([newReminder, ...reminders]);
-    } catch (error) {
-      console.error("Error saving reminder:", error);
-    }
+    await addDoc(collection(db, "reminders"), newReminder);
+    setReminders((prev) => [newReminder, ...prev]);
   };
 
   const deleteReminder = (id: string) => {
-    setReminders(reminders.filter((r) => r.id !== id));
-    if (activeTriggeredReminder?.id === id) setActiveTriggeredReminder(null);
+    setReminders((prev) => prev.filter((r) => r.id !== id));
   };
 
   const completeReminder = (id: string) => {
-    setReminders(
-      reminders.map((r) =>
-        r.id === id ? { ...r, status: "completed" as const } : r,
-      ),
+    setReminders((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, status: "completed" } : r)),
     );
-    if (activeTriggeredReminder?.id === id) setActiveTriggeredReminder(null);
   };
 
   const filteredReminders = reminders.filter((r) => r.status === filter);
 
+  /* ================= UI ================= */
+
   return (
-    <div className="min-h-screen flex flex-col max-w-2xl mx-auto bg-slate-50 border-x border-slate-200 shadow-sm font-sans">
-      <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="bg-blue-600 p-2 rounded-xl text-white shadow-lg shadow-blue-200">
-            <Bell size={24} />
-          </div>
-          <div>
-            <h1 className="text-xl font-black text-slate-800 tracking-tight">
-              GeoReminder
-            </h1>
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              Smart Location Alerts
-            </p>
-          </div>
-        </div>
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className={`min-h-screen transition-all duration-500 ${
+        dark
+          ? "bg-gradient-to-br from-gray-900 via-gray-800 to-black text-white"
+          : "bg-gradient-to-br from-indigo-50 via-white to-purple-50"
+      } font-[Inter] relative overflow-hidden`}
+    >
+      {/* Background blobs */}
+      <div className="absolute -top-20 -left-20 w-[400px] h-[400px] bg-indigo-400/30 rounded-full blur-3xl" />
+      <div className="absolute top-40 -right-20 w-[400px] h-[400px] bg-purple-400/30 rounded-full blur-3xl" />
 
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="bg-slate-900 text-white p-2.5 rounded-xl hover:bg-slate-800 transition-all active:scale-95 shadow-lg shadow-slate-200"
-        >
-          <Plus size={20} />
-        </button>
-      </header>
-
-      <main className="flex-1 overflow-y-auto p-6 space-y-6 pb-24">
-        <div
-          className={`p-4 rounded-2xl border transition-all ${trackingStatus.active ? "bg-blue-50 border-blue-100 shadow-sm" : "bg-slate-100 border-slate-200"}`}
-        >
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Activity
-                size={18}
-                className={
-                  trackingStatus.active
-                    ? "text-blue-600 animate-pulse"
-                    : "text-slate-400"
-                }
-              />
-              <span className="font-bold text-slate-700">
-                Location Tracking
-              </span>
-            </div>
-            <button
-              onClick={trackingStatus.active ? stopTracking : startTracking}
-              className={`px-4 py-1.5 rounded-lg font-bold text-sm transition-all ${
-                trackingStatus.active
-                  ? "bg-white text-blue-600 border border-blue-200 shadow-sm hover:bg-blue-100"
-                  : "bg-blue-600 text-white hover:bg-blue-700 shadow-md"
-              }`}
-            >
-              {trackingStatus.active ? "Stop Tracking" : "Start Tracking"}
-            </button>
-          </div>
-
-          {trackingStatus.error && (
-            <div className="flex items-center gap-2 text-red-500 bg-red-50 p-2 rounded-lg text-xs font-medium border border-red-100 mb-3">
-              <AlertTriangle size={14} />
-              {trackingStatus.error}
-            </div>
-          )}
-
-          {userLoc ? (
-            <div className="grid grid-cols-2 gap-2">
-              <div className="bg-white/50 p-2 rounded-xl border border-blue-50 flex items-center gap-2">
-                <Navigation size={14} className="text-blue-500" />
-                <span className="text-[10px] font-bold text-slate-500 uppercase">
-                  Accuracy: {Math.round(userLoc.accuracy)}m
-                </span>
-              </div>
-              <div className="bg-white/50 p-2 rounded-xl border border-blue-50 flex items-center gap-2">
-                <Activity size={14} className="text-blue-500" />
-                <span className="text-[10px] font-bold text-slate-500 uppercase">
-                  Update: {new Date(userLoc.timestamp).toLocaleTimeString()}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="text-xs text-slate-400 italic flex items-center gap-2">
-              <Info size={14} />
-              Waiting for GPS signal...
-            </div>
-          )}
-        </div>
-
-        <div className="flex bg-slate-200/50 p-1 rounded-xl">
-          {(["active", "triggered", "completed"] as const).map((type) => (
-            <button
-              key={type}
-              onClick={() => setFilter(type)}
-              className={`flex-1 py-2 text-xs font-black uppercase tracking-wider rounded-lg transition-all ${
-                filter === type
-                  ? "bg-white text-slate-800 shadow-sm"
-                  : "text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              {type}
-            </button>
-          ))}
-        </div>
-
-        <div className="space-y-4">
-          {filteredReminders.length === 0 ? (
-            <div className="text-center py-12 px-6">
-              <div className="bg-slate-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
-                <Bell size={32} />
-              </div>
-              <h3 className="font-bold text-slate-400">
-                No {filter} reminders
-              </h3>
-              <p className="text-sm text-slate-400">
-                Your location alerts will appear here.
+      <div className="w-full min-h-screen flex justify-center">
+        <div className="w-full max-w-xl px-6 py-10 relative z-10">
+          {/* Header */}
+          <div className="flex justify-between items-center mb-10">
+            <div>
+              <h1 className="text-5xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 bg-clip-text text-transparent">
+                GeoReminder
+              </h1>
+              <p className="text-slate-500 text-sm mt-2 font-medium">
+                Smart location alerts that trigger exactly when you arrive.
               </p>
             </div>
-          ) : (
-            filteredReminders.map((reminder) => (
-              <div
-                key={reminder.id}
-                className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow group relative overflow-hidden"
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDark(!dark)}
+                className="p-2 rounded-xl bg-white/70 backdrop-blur shadow-md hover:scale-110 transition"
               >
-                {reminder.status === "triggered" && (
-                  <div className="absolute top-0 right-0 left-0 h-1 bg-orange-500" />
-                )}
-                <div className="flex justify-between items-start mb-2">
-                  <h3 className="font-bold text-slate-800 text-lg leading-tight">
-                    {reminder.title}
-                  </h3>
-                  <button
-                    onClick={() => deleteReminder(reminder.id)}
-                    className="text-slate-300 hover:text-red-500 p-1"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
+                {dark ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
 
-                {reminder.notes && (
-                  <p className="text-slate-500 text-sm mb-4 line-clamp-2">
-                    {reminder.notes}
-                  </p>
-                )}
+              <motion.button
+                whileTap={{ scale: 0.9 }}
+                whileHover={{ scale: 1.05 }}
+                onClick={() => setIsModalOpen(true)}
+                className="h-14 w-14 flex items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white shadow-xl shadow-purple-400/30 transition-all duration-300"
+              >
+                <Plus size={24} />
+              </motion.button>
+            </div>
+          </div>
 
-                <div className="flex flex-wrap gap-2 items-center text-[10px] font-bold uppercase tracking-tight">
-                  <div className="flex items-center gap-1 text-blue-600 bg-blue-50 px-2 py-1 rounded-md">
-                    <MapPin size={10} />
-                    {reminder.radiusMeters}m radius
-                  </div>
-                  {reminder.lastDistance !== undefined && (
-                    <div className="flex items-center gap-1 text-slate-500 bg-slate-100 px-2 py-1 rounded-md">
-                      Distance: {formatDistance(reminder.lastDistance)}
-                    </div>
-                  )}
-                  {reminder.status === "completed" && (
-                    <div className="flex items-center gap-1 text-green-600 bg-green-50 px-2 py-1 rounded-md">
-                      <CheckCircle2 size={10} />
-                      Completed
-                    </div>
-                  )}
-                </div>
-
-                {reminder.status === "triggered" && (
-                  <button
-                    onClick={() => completeReminder(reminder.id)}
-                    className="mt-4 w-full py-2 bg-green-600 text-white rounded-xl font-bold text-sm hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <CheckCircle2 size={14} />
-                    Mark as Done
-                  </button>
-                )}
+          {/* Tracking Card */}
+          <motion.div
+            whileHover={{ scale: 1.02 }}
+            className="p-6 rounded-3xl backdrop-blur-xl bg-white/70 border border-white/40 shadow-xl mb-6"
+          >
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <Activity
+                  className={`${
+                    trackingStatus.active
+                      ? "text-green-500 animate-pulse"
+                      : "text-gray-400"
+                  }`}
+                />
+                <span className="font-semibold">
+                  {trackingStatus.active ? "Tracking Active" : "Tracking Off"}
+                </span>
               </div>
-            ))
-          )}
+
+              <button
+                onClick={trackingStatus.active ? stopTracking : startTracking}
+                className={`px-4 py-2 text-sm font-semibold rounded-full ${
+                  trackingStatus.active
+                    ? "bg-red-500 text-white"
+                    : "bg-green-500 text-white"
+                }`}
+              >
+                {trackingStatus.active ? "Stop" : "Start"}
+              </button>
+            </div>
+          </motion.div>
+
+          {/* Filter Tabs */}
+          <div className="flex bg-white/60 backdrop-blur-xl border rounded-2xl p-1 shadow-md mb-6">
+            {(["active", "triggered", "completed"] as const).map((type) => (
+              <button
+                key={type}
+                onClick={() => setFilter(type)}
+                className={`flex-1 py-2 rounded-full text-sm font-semibold transition-all duration-300 ${
+                  filter === type
+                    ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-md"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+
+          {/* Reminder List */}
+          <AnimatePresence>
+            <div className="space-y-4">
+              {filteredReminders.map((reminder) => (
+                <motion.div
+                  key={reminder.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  whileHover={{ y: -4 }}
+                  className="bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-slate-200 shadow-xl transition-all duration-300"
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="font-bold text-lg">{reminder.title}</h3>
+
+                    <button
+                      onClick={() => deleteReminder(reminder.id)}
+                      className="opacity-50 hover:text-red-500 transition"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+
+                  {reminder.notes && (
+                    <p className="text-sm opacity-70 mb-3">{reminder.notes}</p>
+                  )}
+
+                  <div className="flex gap-3 text-xs font-medium">
+                    <div className="flex items-center gap-1 bg-indigo-100 text-indigo-600 px-2 py-1 rounded-md">
+                      <MapPin size={12} />
+                      {reminder.radiusMeters}m
+                    </div>
+
+                    {reminder.lastDistance && (
+                      <div className="bg-gray-100 px-2 py-1 rounded-md">
+                        {formatDistance(reminder.lastDistance)}
+                      </div>
+                    )}
+                  </div>
+
+                  {reminder.status === "triggered" && (
+                    <button
+                      onClick={() => completeReminder(reminder.id)}
+                      className="mt-4 w-full py-2 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 size={16} />
+                      Mark as Done
+                    </button>
+                  )}
+                </motion.div>
+              ))}
+            </div>
+          </AnimatePresence>
         </div>
-      </main>
+      </div>
 
       <AddReminderModal
         isOpen={isModalOpen}
@@ -389,7 +344,7 @@ const App: React.FC = () => {
         onComplete={completeReminder}
         onDelete={deleteReminder}
       />
-    </div>
+    </motion.div>
   );
 };
 
