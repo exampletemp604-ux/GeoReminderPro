@@ -1,5 +1,12 @@
 import { db } from "./utils/firebase";
-import { collection, addDoc, getDocs } from "firebase/firestore";
+import {
+  collection,
+  addDoc,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  updateDoc,
+} from "firebase/firestore";
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus,
@@ -15,7 +22,9 @@ import { Reminder, UserLocation, GeoStatus } from "./types";
 import { calculateDistance, formatDistance } from "./utils/geoUtils";
 import { AddReminderModal } from "./components/AddReminderModal";
 import { TriggeredReminderModal } from "./components/TriggeredReminderModal";
+import { AIChatAssistant } from "./components/AIChatAssistant";
 import { speakReminder } from "./services/ttsService";
+import { categorizeReminder, generateTriggeredMessage } from "./services/geminiService";
 
 const App: React.FC = () => {
   /* ================= UI STATE ================= */
@@ -24,10 +33,7 @@ const App: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [activeTriggeredReminder, setActiveTriggeredReminder] =
     useState<Reminder | null>(null);
-
-  /* ================= PWA INSTALL STATE ================= */
-
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [aiTriggeredMessage, setAiTriggeredMessage] = useState<string | null>(null);
 
   /* ================= APP STATE ================= */
 
@@ -36,6 +42,7 @@ const App: React.FC = () => {
   const [filter, setFilter] = useState<"active" | "triggered" | "completed">(
     "active",
   );
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const [trackingStatus, setTrackingStatus] = useState<GeoStatus>({
     active: false,
@@ -48,54 +55,27 @@ const App: React.FC = () => {
   /* ================= LOAD REMINDERS ================= */
 
   useEffect(() => {
-    const fetchReminders = async () => {
-      const snapshot = await getDocs(collection(db, "reminders"));
-      const loaded = snapshot.docs.map((doc) => doc.data());
-      setReminders(loaded as Reminder[]);
-    };
-    fetchReminders();
-  }, []);
+    const coll = collection(db, "reminders");
 
-  /* ================= PWA INSTALL LOGIC ================= */
+    const unsub = onSnapshot(
+      coll,
+      (snapshot) => {
+        const loaded = snapshot.docs.map((d) => {
+          // Destructure out any embedded 'id' field from document data
+          // so the real Firestore document ID (d.id) always wins.
+          const { id: _discarded, ...rest } = d.data() as Reminder;
+          return { id: d.id, ...rest };
+        });
 
-  useEffect(() => {
-    const handler = (e: any) => {
-      e.preventDefault();
+        console.log("Reminders updated from Firestore:", loaded);
+        setReminders(loaded);
+      },
+      (err) => {
+        console.error("onSnapshot error:", err);
+      },
+    );
 
-      // If already installed → don't show
-      if (window.matchMedia("(display-mode: standalone)").matches) return;
-
-      // If already shown once → don't show again
-      if (localStorage.getItem("pwa-install-seen")) return;
-
-      setDeferredPrompt(e);
-    };
-
-    window.addEventListener("beforeinstallprompt", handler);
-
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!deferredPrompt) return;
-
-    const timer = setTimeout(async () => {
-      deferredPrompt.prompt();
-      await deferredPrompt.userChoice;
-
-      localStorage.setItem("pwa-install-seen", "true");
-      setDeferredPrompt(null);
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [deferredPrompt]);
-
-  useEffect(() => {
-    window.addEventListener("appinstalled", () => {
-      localStorage.setItem("pwa-install-seen", "true");
-    });
+    return () => unsub();
   }, []);
 
   /* ================= TRACKING ================= */
@@ -105,40 +85,63 @@ const App: React.FC = () => {
 
     setTrackingStatus((prev) => ({ ...prev, active: true }));
 
-    watchIdRef.current = navigator.geolocation.watchPosition((pos) => {
-      const { latitude, longitude, accuracy } = pos.coords;
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords;
 
-      setUserLoc({
-        lat: latitude,
-        lng: longitude,
-        accuracy,
-        timestamp: Date.now(),
-      });
+        setUserLoc({
+          lat: latitude,
+          lng: longitude,
+          accuracy,
+          timestamp: Date.now(),
+        });
 
-      setReminders((prev) =>
-        prev.map((r) => {
-          if (r.status !== "active") return r;
+        setReminders((prev) =>
+          prev.map((r) => {
+            if (r.status !== "active") return r;
 
-          const dist = calculateDistance(latitude, longitude, r.lat, r.lng);
+            const dist = calculateDistance(latitude, longitude, r.lat, r.lng);
 
-          if (dist <= r.radiusMeters) {
-            speakReminder(r.originalInput || r.title);
+            if (dist <= r.radiusMeters) {
+              speakReminder(r.originalInput || r.title);
 
-            const updated = {
-              ...r,
-              status: "triggered" as const,
-              triggeredAt: Date.now(),
-              lastDistance: dist,
-            };
+              const triggered = {
+                ...r,
+                status: "triggered" as const,
+                triggeredAt: Date.now(),
+                lastDistance: dist,
+              };
 
-            setActiveTriggeredReminder(updated);
-            return updated;
-          }
+              // Persist to Firestore so onSnapshot doesn't reset status back to 'active'
+              updateDoc(doc(db, "reminders", r.id), {
+                status: "triggered",
+                triggeredAt: triggered.triggeredAt,
+              }).catch((err) => console.error("Failed to mark triggered:", err));
 
-          return { ...r, lastDistance: dist };
-        }),
-      );
-    });
+              // Generate AI contextual message for the popup
+              setAiTriggeredMessage(null);
+              generateTriggeredMessage(r.title, r.notes, r.createdAt)
+                .then((msg) => setAiTriggeredMessage(msg))
+                .catch(() => {});
+
+              setActiveTriggeredReminder(triggered);
+              return triggered;
+            }
+
+            // Note: lastDistance is local-only — never written to Firestore
+            return { ...r, lastDistance: dist };
+          }),
+        );
+      },
+      (error) => {
+        console.error("Geolocation error:", error);
+        setTrackingStatus((prev) => ({
+          ...prev,
+          active: false,
+          error: error.message,
+        }));
+      },
+    );
   }, []);
 
   const stopTracking = useCallback(() => {
@@ -149,35 +152,55 @@ const App: React.FC = () => {
     setTrackingStatus((prev) => ({ ...prev, active: false }));
   }, []);
 
-  /* ================= CRUD ================= */
+  /* ================= ADD ================= */
 
   const handleAddReminder = async (
     data: Omit<Reminder, "id" | "createdAt" | "status">,
   ) => {
-    const newReminder: Reminder = {
+    const docRef = await addDoc(collection(db, "reminders"), {
       ...data,
-      id: crypto.randomUUID(),
       createdAt: Date.now(),
       status: "active",
-    };
+    });
 
-    await addDoc(collection(db, "reminders"), newReminder);
-    setReminders((prev) => [newReminder, ...prev]);
+    // Fire-and-forget: auto-categorize with Gemini then patch the doc
+    categorizeReminder(data.title, data.notes)
+      .then(({ category, emoji, categoryColor }) =>
+        updateDoc(doc(db, "reminders", docRef.id), { category, emoji, categoryColor })
+      )
+      .catch(() => {});
   };
 
-  const deleteReminder = (id: string) => {
-    setReminders((prev) => prev.filter((r) => r.id !== id));
+  /* ================= DELETE ================= */
+  const deleteReminder = async (id: string) => {
+    try {
+      console.log("Deleting reminder with id:", id);
+      setDeletingId(id);
+      await deleteDoc(doc(db, "reminders", id));
+      console.log("Delete successful for:", id);
+    } catch (err) {
+      console.error("Delete failed:", err);
+      alert("Failed to delete reminder. Please try again.");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
-  const completeReminder = (id: string) => {
-    setReminders((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, status: "completed" } : r)),
-    );
+  /* ================= COMPLETE ================= */
+  const completeReminder = async (id: string) => {
+    try {
+      console.log("Completing reminder with id:", id);
+      await updateDoc(doc(db, "reminders", id), { status: "completed" });
+      console.log("Complete successful");
+    } catch (err) {
+      console.error("Complete failed:", err);
+      alert("Failed to complete reminder");
+    }
   };
 
   const filteredReminders = reminders.filter((r) => r.status === filter);
 
-  /* ================= UI ================= */
+  /* ================= UI (UNCHANGED) ================= */
 
   return (
     <motion.div
@@ -189,10 +212,7 @@ const App: React.FC = () => {
           : "bg-gradient-to-br from-indigo-50 via-white to-purple-50"
       } font-[Inter] relative overflow-hidden`}
     >
-      {/* Background blobs */}
-      <div className="absolute -top-20 -left-20 w-[400px] h-[400px] bg-indigo-400/30 rounded-full blur-3xl" />
-      <div className="absolute top-40 -right-20 w-[400px] h-[400px] bg-purple-400/30 rounded-full blur-3xl" />
-
+      <div className="absolute -top-20 -left-20 w-[400px] h-[400px] bg-indigo-400/30 rounded-full blur-3xl pointer-events-none" />
       <div className="w-full min-h-screen flex justify-center">
         <div className="w-full max-w-xl px-6 py-10 relative z-10">
           {/* Header */}
@@ -284,14 +304,28 @@ const App: React.FC = () => {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -20 }}
                   whileHover={{ y: -4 }}
-                  className="bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-slate-200 shadow-xl transition-all duration-300"
+                  className="relative z-10 bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-slate-200 shadow-xl transition-all duration-300"
                 >
                   <div className="flex justify-between items-start mb-2">
-                    <h3 className="font-bold text-lg">{reminder.title}</h3>
+                    <div className="flex-1 mr-3">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <h3 className="font-bold text-lg">{reminder.title}</h3>
+                        {reminder.emoji && reminder.categoryColor && (
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${reminder.categoryColor}`}>
+                            {reminder.emoji} {reminder.category}
+                          </span>
+                        )}
+                      </div>
+                    </div>
 
                     <button
                       onClick={() => deleteReminder(reminder.id)}
-                      className="opacity-50 hover:text-red-500 transition"
+                      disabled={deletingId === reminder.id}
+                      className={`transition shrink-0 ${
+                        deletingId === reminder.id
+                          ? "opacity-25 cursor-not-allowed"
+                          : "opacity-50 hover:text-red-500 hover:opacity-100"
+                      }`}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -340,9 +374,16 @@ const App: React.FC = () => {
 
       <TriggeredReminderModal
         reminder={activeTriggeredReminder}
-        onClose={() => setActiveTriggeredReminder(null)}
+        aiMessage={aiTriggeredMessage}
+        onClose={() => { setActiveTriggeredReminder(null); setAiTriggeredMessage(null); }}
         onComplete={completeReminder}
         onDelete={deleteReminder}
+      />
+
+      <AIChatAssistant
+        reminders={reminders}
+        onCompleteReminder={completeReminder}
+        onDeleteReminder={deleteReminder}
       />
     </motion.div>
   );

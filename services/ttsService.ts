@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, Modality } from "@google/genai";
 
 // Audio Decoding Helpers
@@ -38,36 +37,50 @@ export async function speakReminder(text: string) {
   if (!text) return;
 
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+
+    if (!apiKey) {
+      console.warn("TTS API key not configured. Skipping voice reminder.");
+      return;
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+
     // We start the network request immediately
     const responsePromise = ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ 
-        parts: [{ 
-          text: `Say: "You are near to ${text}. Buy the product."` 
-        }] 
-      }],
+      contents: [
+        {
+          parts: [
+            {
+              text: `Say: "You are near to ${text}. Buy the product."`,
+            },
+          ],
+        },
+      ],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Kore' },
+            prebuiltVoiceConfig: { voiceName: "Kore" },
           },
         },
       },
     });
 
     const response = await responsePromise;
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    
+    const base64Audio =
+      response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
     if (!base64Audio) return;
 
     if (!globalAudioContext) {
-      globalAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      globalAudioContext = new (
+        window.AudioContext || (window as any).webkitAudioContext
+      )({ sampleRate: 24000 });
     }
-    
-    if (globalAudioContext.state === 'suspended') {
+
+    if (globalAudioContext.state === "suspended") {
       await globalAudioContext.resume();
     }
 
@@ -77,13 +90,13 @@ export async function speakReminder(text: string) {
       24000,
       1,
     );
-    
+
     const source = globalAudioContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(globalAudioContext.destination);
     source.start();
-
   } catch (error) {
-    console.error("Voice Assistant Error:", error);
+    console.warn("Voice reminder unavailable:", (error as Error).message);
+    // Fail silently - don't block reminder functionality
   }
 }

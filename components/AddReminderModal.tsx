@@ -137,6 +137,7 @@ export const AddReminderModal: React.FC<AddReminderModalProps> = ({ isOpen, onCl
             <div className="space-y-2">
               <label className="block text-sm font-medium text-slate-700">Set Reminder Location</label>
               <MapPicker 
+                key={`${lat},${lng}`}
                 initialLat={lat} 
                 initialLng={lng} 
                 radius={radius}

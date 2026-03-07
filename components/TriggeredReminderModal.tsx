@@ -1,16 +1,17 @@
 
 import React from 'react';
-import { Bell, CheckCircle2, Trash2, X, MapPin } from 'lucide-react';
+import { Bell, CheckCircle2, Trash2, X, MapPin, Sparkles } from 'lucide-react';
 import { Reminder } from '../types';
 
 interface TriggeredReminderModalProps {
   reminder: Reminder | null;
+  aiMessage?: string | null;
   onClose: () => void;
   onComplete: (id: string) => void;
   onDelete: (id: string) => void;
 }
 
-export const TriggeredReminderModal: React.FC<TriggeredReminderModalProps> = ({ reminder, onClose, onComplete, onDelete }) => {
+export const TriggeredReminderModal: React.FC<TriggeredReminderModalProps> = ({ reminder, aiMessage, onClose, onComplete, onDelete }) => {
   if (!reminder) return null;
 
   return (
@@ -38,9 +39,16 @@ export const TriggeredReminderModal: React.FC<TriggeredReminderModalProps> = ({ 
             </div>
           </div>
 
+          {aiMessage && (
+            <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex gap-3">
+              <Sparkles size={18} className="text-amber-500 shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-800 leading-relaxed font-medium">{aiMessage}</p>
+            </div>
+          )}
+
           {reminder.notes && (
             <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 italic text-slate-600">
-              "{reminder.notes}"
+              {reminder.notes}
             </div>
           )}
 

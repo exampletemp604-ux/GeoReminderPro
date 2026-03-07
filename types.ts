@@ -1,6 +1,10 @@
 
 export type ReminderStatus = 'active' | 'triggered' | 'completed';
 
+export type ReminderCategory =
+  | 'Shopping' | 'Health' | 'Food' | 'Study'
+  | 'Work' | 'Finance' | 'Travel' | 'Fitness' | 'Other';
+
 export interface Reminder {
   id: string;
   title: string;
@@ -13,6 +17,10 @@ export interface Reminder {
   status: ReminderStatus;
   triggeredAt?: number;
   lastDistance?: number;
+  // AI auto-categorization fields
+  category?: ReminderCategory;
+  emoji?: string;
+  categoryColor?: string;
 }
 
 export interface UserLocation {
@@ -27,3 +35,10 @@ export interface GeoStatus {
   error: string | null;
   lastUpdate: number | null;
 }
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+}
+
